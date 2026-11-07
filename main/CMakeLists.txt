@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "wt32_display.c"
         "agent.c"
         "agent_commands.c"
         "agent_prompt.c"
@@ -44,6 +45,8 @@ idf_component_register(
         esp_wifi
         esp_http_client
         esp_netif
+        esp_lcd
+        esp_lcd_st7796
         esp-tls
         esp_timer
         json

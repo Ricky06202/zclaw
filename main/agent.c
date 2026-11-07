@@ -12,6 +12,9 @@
 #include "memory.h"
 #include "nvs_keys.h"
 #include "telegram.h"
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY
+#include "wt32_display.h"
+#endif
 #include "cJSON.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -174,6 +177,9 @@ static void queue_telegram_response(const char *text, int64_t chat_id)
 
 static void send_response(const char *text, int64_t chat_id)
 {
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY
+    (void)wt32_display_append_chat_message(WT32_DISPLAY_CHAT_ASSISTANT, text);
+#endif
     queue_channel_response(text);
     queue_telegram_response(text, chat_id);
 }
@@ -399,6 +405,9 @@ static int64_t response_chat_id_for_source(message_source_t source, int64_t chat
 // Process a single user message
 static void process_message(const char *user_message, message_source_t source, int64_t reply_chat_id)
 {
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY
+    (void)wt32_display_append_chat_message(WT32_DISPLAY_CHAT_USER, user_message);
+#endif
     ESP_LOGI(TAG, "Processing: %s", user_message);
     int history_turn_start = s_history_len;
     bool is_non_command_message = !agent_is_slash_command(user_message);

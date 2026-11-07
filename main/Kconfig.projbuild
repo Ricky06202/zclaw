@@ -1,5 +1,13 @@
 menu "zclaw Configuration"
 
+    config ZCLAW_WT32_SC01_DISPLAY
+        bool "WT32-SC01 v3.3 display splash"
+        depends on IDF_TARGET_ESP32
+        default n
+        help
+            Initialize the WT32-SC01 v3.3 ST7796 LCD and show a static
+            boot splash. This does not enable a touch-driven chat interface.
+
     config ZCLAW_WIFI_SSID
         string "WiFi SSID (for testing only)"
         default ""

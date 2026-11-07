@@ -14,6 +14,7 @@
 #include "nvs_keys.h"
 #include "messages.h"
 #include "gpio_policy.h"
+#include "wt32_display.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -131,6 +132,11 @@ void app_main(void)
     ESP_LOGI(TAG, "  AI Agent on ESP32");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
+
+    esp_err_t display_err = wt32_display_init();
+    if (display_err != ESP_OK) {
+        ESP_LOGW(TAG, "WT32-SC01 display unavailable: %s", esp_err_to_name(display_err));
+    }
 
     // 1. Initialize NVS
     ESP_ERROR_CHECK(memory_init());

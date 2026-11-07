@@ -20,6 +20,46 @@
 #include "esp_log.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
+
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY && !CONFIG_ZCLAW_EMULATOR_LIVE_LLM
+#include "esp_system.h"
+#include "memory.h"
+#include "nvs_keys.h"
+
+#define DEEPSEEK_PROVISION_PREFIX "__zclaw_deepseek_key__:"
+#define DEEPSEEK_PROVISION_RESPONSE "__zclaw_deepseek_key_resp__:"
+#define DEEPSEEK_API_KEY_MAX_LEN 255
+
+static esp_err_t channel_store_deepseek_config(const char *api_key)
+{
+    if (api_key == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t key_len = strnlen(api_key, DEEPSEEK_API_KEY_MAX_LEN + 1);
+    if (key_len < 16 || key_len > DEEPSEEK_API_KEY_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < key_len; i++) {
+        if ((unsigned char)api_key[i] < 0x21 || (unsigned char)api_key[i] > 0x7E) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    // Store the provider switch last so a failed update leaves the old backend active.
+    esp_err_t err = memory_set(NVS_KEY_API_KEY, api_key);
+    if (err == ESP_OK) {
+        err = memory_set(NVS_KEY_LLM_MODEL, "deepseek-flash");
+    }
+    if (err == ESP_OK) {
+        err = memory_set(NVS_KEY_LLM_API_URL, "https://api.deepseek.com/chat/completions");
+    }
+    if (err == ESP_OK) {
+        err = memory_set(NVS_KEY_LLM_BACKEND, "openai");
+    }
+    return err;
+}
+#endif
 
 static const char *TAG = "channel";
 
@@ -148,6 +188,14 @@ static void channel_read_task(void *arg)
     char line_buf[CHANNEL_RX_BUF_SIZE];
     int line_pos = 0;
     uint8_t byte;
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY && !CONFIG_ZCLAW_EMULATOR_LIVE_LLM
+    const size_t provision_prefix_len = sizeof(DEEPSEEK_PROVISION_PREFIX) - 1;
+    char provision_prefix_hold[sizeof(DEEPSEEK_PROVISION_PREFIX) - 1];
+    size_t provision_prefix_hold_len = 0;
+    bool provision_prefix_check_active = true;
+    bool provision_line = false;
+    bool provision_truncated = false;
+#endif
 #if CONFIG_ZCLAW_EMULATOR_LIVE_LLM
     char held_echo[sizeof(LLM_BRIDGE_RESP_PREFIX)];
     int held_echo_len = 0;
@@ -194,6 +242,42 @@ static void channel_read_task(void *arg)
                 }
 #endif
 
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY && !CONFIG_ZCLAW_EMULATOR_LIVE_LLM
+                if (provision_line) {
+                    line_buf[line_pos] = '\0';
+                    esp_err_t provision_err = provision_truncated
+                                                  ? ESP_ERR_INVALID_ARG
+                                                  : channel_store_deepseek_config(
+                                                        line_buf + provision_prefix_len);
+                    const char *ack = provision_err == ESP_OK
+                                          ? DEEPSEEK_PROVISION_RESPONSE "OK\r\n"
+                                          : DEEPSEEK_PROVISION_RESPONSE "ERR\r\n";
+                    channel_io_write_bytes((const uint8_t *)ack, strlen(ack), portMAX_DELAY);
+                    line_pos = 0;
+                    provision_prefix_hold_len = 0;
+                    provision_prefix_check_active = true;
+                    provision_line = false;
+                    provision_truncated = false;
+                    if (provision_err == ESP_OK) {
+                        vTaskDelay(pdMS_TO_TICKS(300));
+                        esp_restart();
+                    }
+                    continue;
+                }
+
+                if (provision_prefix_hold_len > 0) {
+                    for (size_t i = 0; i < provision_prefix_hold_len; i++) {
+                        if (line_pos < CHANNEL_RX_BUF_SIZE - 1) {
+                            line_buf[line_pos++] = provision_prefix_hold[i];
+                        }
+                        channel_io_write_bytes((const uint8_t *)&provision_prefix_hold[i],
+                                               1, portMAX_DELAY);
+                    }
+                    provision_prefix_hold_len = 0;
+                    provision_prefix_check_active = false;
+                }
+#endif
+
                 if (line_pos > 0) {
                     line_buf[line_pos] = '\0';
                     channel_io_write_bytes((const uint8_t *)"\r\n", 2, portMAX_DELAY);
@@ -218,6 +302,12 @@ static void channel_read_task(void *arg)
                 bridge_payload_pos = 0;
                 bridge_payload_truncated = false;
 #endif
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY && !CONFIG_ZCLAW_EMULATOR_LIVE_LLM
+                provision_prefix_hold_len = 0;
+                provision_prefix_check_active = true;
+                provision_line = false;
+                provision_truncated = false;
+#endif
             } else if (byte == 0x7F || byte == 0x08) {
 #if CONFIG_ZCLAW_EMULATOR_LIVE_LLM
                 if (bridge_line) {
@@ -228,6 +318,25 @@ static void channel_read_task(void *arg)
                     held_echo_len--;
                     channel_io_write_bytes((const uint8_t *)"\b \b", 3, portMAX_DELAY);
                     continue;
+                }
+#endif
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY && !CONFIG_ZCLAW_EMULATOR_LIVE_LLM
+                if (provision_line) {
+                    if (line_pos > (int)provision_prefix_len) {
+                        line_pos--;
+                    }
+                    continue;
+                }
+                if (provision_prefix_hold_len > 0) {
+                    for (size_t i = 0; i < provision_prefix_hold_len; i++) {
+                        if (line_pos < CHANNEL_RX_BUF_SIZE - 1) {
+                            line_buf[line_pos++] = provision_prefix_hold[i];
+                        }
+                        channel_io_write_bytes((const uint8_t *)&provision_prefix_hold[i],
+                                               1, portMAX_DELAY);
+                    }
+                    provision_prefix_hold_len = 0;
+                    provision_prefix_check_active = false;
                 }
 #endif
 
@@ -280,6 +389,41 @@ static void channel_read_task(void *arg)
                 channel_io_write_bytes(&byte, 1, portMAX_DELAY);
 #else
             } else {
+#if CONFIG_ZCLAW_WT32_SC01_DISPLAY
+                if (provision_line) {
+                    if (line_pos < CHANNEL_RX_BUF_SIZE - 1) {
+                        line_buf[line_pos++] = (char)byte;
+                    } else {
+                        provision_truncated = true;
+                    }
+                    continue;
+                }
+
+                if (provision_prefix_check_active) {
+                    if ((size_t)provision_prefix_hold_len < provision_prefix_len &&
+                        byte == (uint8_t)DEEPSEEK_PROVISION_PREFIX[
+                                    provision_prefix_hold_len]) {
+                        provision_prefix_hold[provision_prefix_hold_len++] = (char)byte;
+                        if (provision_prefix_hold_len == provision_prefix_len) {
+                            memcpy(line_buf, DEEPSEEK_PROVISION_PREFIX, provision_prefix_len);
+                            line_pos = (int)provision_prefix_len;
+                            provision_line = true;
+                            provision_prefix_check_active = false;
+                        }
+                        continue;
+                    }
+
+                    provision_prefix_check_active = false;
+                    for (size_t i = 0; i < provision_prefix_hold_len; i++) {
+                        if (line_pos < CHANNEL_RX_BUF_SIZE - 1) {
+                            line_buf[line_pos++] = provision_prefix_hold[i];
+                        }
+                        channel_io_write_bytes((const uint8_t *)&provision_prefix_hold[i],
+                                               1, portMAX_DELAY);
+                    }
+                    provision_prefix_hold_len = 0;
+                }
+#endif
                 if (line_pos < CHANNEL_RX_BUF_SIZE - 1) {
                     line_buf[line_pos++] = (char)byte;
                 }

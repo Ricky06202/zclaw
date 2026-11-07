@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Zclaw · WT32-SC01</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      background: #0b1020;
+      color: #edf2fa;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --panel: #121a2c;
+      --border: #27334a;
+      --muted: #9aa9c0;
+      --accent: #75a7ff;
+    }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 20px; }
+    main { width: min(100%, 760px); height: min(880px, calc(100vh - 40px)); display: grid; grid-template-rows: auto 1fr auto auto; gap: 14px; }
+    header, .composer, .messages { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; }
+    h1 { font-size: 1.05rem; margin: 0 0 5px; letter-spacing: .01em; }
+    .subtitle, .privacy, .hint { color: var(--muted); font-size: .86rem; line-height: 1.45; }
+    .subtitle { margin: 0; }
+    .connection { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: .84rem; white-space: nowrap; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #8793a8; }
+    .connection[data-connected="true"] .dot { background: #55d6a4; box-shadow: 0 0 12px #55d6a477; }
+    button { border: 0; border-radius: 11px; padding: 11px 15px; background: var(--accent); color: #08101f; font: inherit; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #283650; color: #eaf1ff; }
+    button:disabled { opacity: .48; cursor: not-allowed; }
+    .messages { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+    .welcome { margin: auto; max-width: 420px; color: var(--muted); text-align: center; line-height: 1.55; }
+    .bubble { max-width: min(88%, 620px); padding: 12px 15px; border-radius: 15px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+    .bubble.user { align-self: flex-end; background: #244579; border-bottom-right-radius: 5px; }
+    .bubble.agent { align-self: flex-start; background: #202b40; border-bottom-left-radius: 5px; }
+    .bubble.notice { align-self: center; color: #ffc98a; background: #392c1d; font-size: .88rem; }
+    .composer { padding: 12px; display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+    textarea { width: 100%; min-height: 52px; max-height: 180px; resize: vertical; border: 1px solid #35435c; border-radius: 11px; padding: 12px; background: #0c1322; color: inherit; font: inherit; line-height: 1.4; }
+    textarea:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .privacy { margin: 0 4px; text-align: center; }
+    .hint { margin: 0; }
+    [hidden] { display: none !important; }
+    @media (max-width: 560px) {
+      body { padding: 10px; }
+      main { height: calc(100vh - 20px); gap: 9px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .connection { width: 100%; justify-content: space-between; }
+      .messages { padding: 13px; }
+      .composer { grid-template-columns: 1fr; }
+      .composer button { justify-self: end; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Zclaw · WT32-SC01</h1>
+        <p class="subtitle">Chat por USB; el modelo y la clave siguen en la placa.</p>
+      </div>
+      <div class="connection" id="connection" role="status" aria-live="polite" data-connected="false">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="connection-text">Desconectado</span>
+        <button id="connect-button" type="button">Conectar WT32</button>
+        <button id="disconnect-button" class="secondary" type="button" hidden>Desconectar</button>
+      </div>
+    </header>
+
+    <section class="messages" id="messages" aria-label="Conversación" aria-live="polite">
+      <p class="welcome" id="welcome">Conecta la placa por USB y autoriza el CP2104. Después podrás escribir desde aquí; las respuestas también aparecen en la pantalla de la WT32.</p>
+    </section>
+
+    <form class="composer" id="composer">
+      <textarea id="message" rows="2" placeholder="Escribe un mensaje…" aria-label="Mensaje" disabled></textarea>
+      <button id="send-button" type="submit" disabled>Enviar</button>
+    </form>
+
+    <p class="privacy">La conversación no se envía a servidores ni se almacena. Solo pasa por el puerto serial que autorices.</p>
+    <p class="hint" id="hint"></p>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const BAUD_RATE = 115200;
+      const RESPONSE_TIMEOUT_MS = 90_000;
+      const IDLE_TIMEOUT_MS = 1_200;
+      const SERIAL_FILTERS = [{ usbVendorId: 0x10c4, usbProductId: 0xea60 }];
+      const ESP_LOG_PREFIXES = ["I (", "W (", "E (", "D (", "V ("];
+      const BOOT_LOG_PREFIXES = ["ets ", "rst:", "boot:", "SPIWP:", "mode:", "load:", "entry "];
+
+      const connection = document.querySelector("#connection");
+      const connectionText = document.querySelector("#connection-text");
+      const connectButton = document.querySelector("#connect-button");
+      const disconnectButton = document.querySelector("#disconnect-button");
+      const messages = document.querySelector("#messages");
+      const welcome = document.querySelector("#welcome");
+      const composer = document.querySelector("#composer");
+      const messageInput = document.querySelector("#message");
+      const sendButton = document.querySelector("#send-button");
+      const hint = document.querySelector("#hint");
+
+      let port = null;
+      let reader = null;
+      let writer = null;
+      let serialBuffer = "";
+      let pendingResponse = null;
+
+      function setStatus(text, connected = false) {
+        connectionText.textContent = text;
+        connection.dataset.connected = String(connected);
+        connectButton.hidden = connected;
+        disconnectButton.hidden = !connected;
+        messageInput.disabled = !connected;
+        sendButton.disabled = !connected || pendingResponse !== null;
+      }
+
+      function addBubble(kind, text) {
+        welcome.hidden = true;
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${kind}`;
+        bubble.textContent = text;
+        messages.append(bubble);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      function isSerialLog(line) {
+        const stripped = line.trim();
+        return ESP_LOG_PREFIXES.some(prefix => stripped.startsWith(prefix)) ||
+          BOOT_LOG_PREFIXES.some(prefix => stripped.startsWith(prefix));
+      }
+
+      function isWt32Port(candidate) {
+        const info = candidate?.getInfo?.();
+        return info?.usbVendorId === 0x10c4 && info?.usbProductId === 0xea60;
+      }
+
+      function settlePending(error = null) {
+        const transaction = pendingResponse;
+        if (!transaction) return;
+        pendingResponse = null;
+        clearTimeout(transaction.responseTimer);
+        clearTimeout(transaction.idleTimer);
+        sendButton.disabled = !port;
+
+        if (error) {
+          transaction.reject(error);
+          return;
+        }
+
+        const response = transaction.lines.join("\n").trim();
+        if (!response) {
+          transaction.reject(new Error("La placa no devolvió texto de respuesta."));
+        } else {
+          transaction.resolve(response);
+        }
+      }
+
+      function handleSerialLine(line) {
+        const transaction = pendingResponse;
+        if (!transaction) return;
+
+        if (!transaction.sawEcho) {
+          if (line.trim() === transaction.prompt) transaction.sawEcho = true;
+          return;
+        }
+        if (isSerialLog(line)) return;
+
+        if (!line.trim()) {
+          if (transaction.lines.length && transaction.lines[transaction.lines.length - 1] !== "") {
+            transaction.lines.push("");
+          }
+          return;
+        }
+
+        transaction.lines.push(line);
+        clearTimeout(transaction.idleTimer);
+        transaction.idleTimer = setTimeout(() => settlePending(), IDLE_TIMEOUT_MS);
+      }
+
+      async function readSerial(currentPort) {
+        const currentReader = currentPort.readable.getReader();
+        reader = currentReader;
+        const decoder = new TextDecoder();
+        let failure = null;
+
+        try {
+          while (true) {
+            const { value, done } = await currentReader.read();
+            if (done) break;
+            serialBuffer += decoder.decode(value, { stream: true });
+            let newline;
+            while ((newline = serialBuffer.indexOf("\n")) !== -1) {
+              const line = serialBuffer.slice(0, newline).replace(/\r$/, "");
+              serialBuffer = serialBuffer.slice(newline + 1);
+              handleSerialLine(line);
+            }
+          }
+        } catch (error) {
+          failure = error;
+        } finally {
+          try { currentReader.releaseLock(); } catch (_) {}
+          if (reader === currentReader) reader = null;
+          if (port === currentPort) {
+            const reason = failure ? `USB desconectado: ${failure.message}` : "USB desconectado.";
+            await closeConnection(reason);
+          }
+        }
+      }
+
+      async function closeConnection(reason = "Desconectado.") {
+        const currentPort = port;
+        port = null;
+        settlePending(new Error(reason));
+
+        const currentReader = reader;
+        reader = null;
+        if (currentReader) {
+          try { await currentReader.cancel(); } catch (_) {}
+          try { currentReader.releaseLock(); } catch (_) {}
+        }
+
+        const currentWriter = writer;
+        writer = null;
+        if (currentWriter) {
+          try { currentWriter.releaseLock(); } catch (_) {}
+        }
+
+        if (currentPort) {
+          try { await currentPort.close(); } catch (_) {}
+        }
+
+        serialBuffer = "";
+        setStatus(reason, false);
+      }
+
+      async function openPort(selectedPort, restored = false) {
+        if (port) return;
+        try {
+          await selectedPort.open({ baudRate: BAUD_RATE });
+          port = selectedPort;
+          writer = selectedPort.writable.getWriter();
+          serialBuffer = "";
+          setStatus(restored ? "WT32 reconectada · 115200 baud" : "WT32 conectada · 115200 baud", true);
+          hint.textContent = "Si la placa se reinicia al abrir el puerto, espera a que termine el arranque antes de enviar el primer mensaje.";
+          void readSerial(selectedPort);
+        } catch (error) {
+          if (port === selectedPort) await closeConnection("No se pudo abrir el puerto.");
+          try { await selectedPort.close(); } catch (_) {}
+          throw error;
+        }
+      }
+
+      async function connect() {
+        if (!window.isSecureContext || !("serial" in navigator)) {
+          addBubble("notice", "Web Serial no está disponible. Abre esta página localmente o desde HTTPS en Chrome o Edge.");
+          return;
+        }
+
+        connectButton.disabled = true;
+        setStatus("Selecciona el puerto USB…", false);
+        try {
+          const selectedPort = await navigator.serial.requestPort({ filters: SERIAL_FILTERS });
+          await openPort(selectedPort);
+        } catch (error) {
+          if (error.name === "NotFoundError" || error.name === "AbortError") {
+            setStatus("Conexión cancelada", false);
+          } else {
+            setStatus("No se pudo abrir el puerto", false);
+            addBubble("notice", `${error.message} Cierra otros programas de puerto serial e intenta de nuevo.`);
+          }
+        } finally {
+          connectButton.disabled = false;
+        }
+      }
+
+      async function reconnectAuthorizedPort(candidate = null) {
+        if (port || !window.isSecureContext || !("serial" in navigator)) return;
+        try {
+          const allowedPorts = (await navigator.serial.getPorts()).filter(isWt32Port);
+          if (allowedPorts.length !== 1) return;
+          const selectedPort = candidate && isWt32Port(candidate) ? candidate : allowedPorts[0];
+          await openPort(selectedPort, true);
+        } catch (_) {
+          // A port can still be authorized while unplugged; leave manual connect available.
+        }
+      }
+
+      async function sendMessage(event) {
+        event.preventDefault();
+        if (!port || !writer || pendingResponse) return;
+
+        const prompt = messageInput.value.replace(/\r?\n/g, " ").trim();
+        if (!prompt) return;
+
+        let resolveResponse;
+        let rejectResponse;
+        const responsePromise = new Promise((resolve, reject) => {
+          resolveResponse = resolve;
+          rejectResponse = reject;
+        });
+        // The serial write can fail before the await below attaches its handler.
+        responsePromise.catch(() => {});
+
+        const transaction = {
+          prompt,
+          sawEcho: false,
+          lines: [],
+          idleTimer: null,
+          responseTimer: null,
+          resolve: resolveResponse,
+          reject: rejectResponse,
+        };
+        pendingResponse = transaction;
+        transaction.responseTimer = setTimeout(
+          () => settlePending(new Error("La placa tardó demasiado en responder.")),
+          RESPONSE_TIMEOUT_MS,
+        );
+        sendButton.disabled = true;
+        addBubble("user", prompt);
+        messageInput.value = "";
+
+        try {
+          await writer.write(new TextEncoder().encode(`${prompt}\n`));
+          addBubble("agent", await responsePromise);
+        } catch (error) {
+          if (pendingResponse === transaction) settlePending(error);
+          addBubble("notice", error.message || "No se pudo enviar el mensaje.");
+        } finally {
+          sendButton.disabled = !port;
+          messageInput.focus();
+        }
+      }
+
+      connectButton.addEventListener("click", connect);
+      disconnectButton.addEventListener("click", () => void closeConnection("Desconectado por el usuario."));
+      composer.addEventListener("submit", sendMessage);
+      messageInput.addEventListener("keydown", event => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          composer.requestSubmit();
+        }
+      });
+
+      if ("serial" in navigator) {
+        navigator.serial.addEventListener("connect", event => {
+          if (isWt32Port(event.port)) void reconnectAuthorizedPort(event.port);
+        });
+        navigator.serial.addEventListener("disconnect", event => {
+          if (event.target === port) void closeConnection("WT32 desconectada.");
+        });
+        void reconnectAuthorizedPort();
+      }
+
+      if (!window.isSecureContext) {
+        hint.textContent = "El navegador exige HTTPS o un archivo local para usar USB Serial.";
+      } else if (!("serial" in navigator)) {
+        hint.textContent = "Usa una versión reciente de Chrome o Edge para conectar por USB.";
+        connectButton.disabled = true;
+      }
+    })();
+  </script>
+</body>
+</html>
