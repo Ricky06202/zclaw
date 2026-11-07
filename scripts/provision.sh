@@ -7,10 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PORT=""
 WIFI_SSID=""
-WIFI_PASS=""
+# Secret inputs may come from the environment to avoid argv/history exposure.
+WIFI_PASS="${ZCLAW_WIFI_PASS:-}"
 BACKEND=""
 MODEL=""
-API_KEY=""
+API_KEY="${ZCLAW_API_KEY:-}"
 API_URL=""
 TG_TOKEN=""
 TG_CHAT_IDS=""
@@ -261,7 +262,7 @@ check_wifi_credentials() {
     echo "  SSID: $WIFI_SSID"
 
     if [ -n "$WIFI_PASS" ]; then
-        echo "  Password: $WIFI_PASS"
+        echo "  Password: [set]"
 
         if ! validate_wifi_password_length; then
             return 1
@@ -304,8 +305,13 @@ prompt_wifi_password() {
     local confirm
 
     while true; do
-        read -r -p "WiFi password (visible; leave blank for open network): " WIFI_PASS
-        echo "Entered WiFi password: ${WIFI_PASS:-<empty>}"
+        read -r -s -p "WiFi password (leave blank for open network): " WIFI_PASS
+        printf '\n'
+        if [ -n "$WIFI_PASS" ]; then
+            echo "Entered WiFi password: [set]"
+        else
+            echo "Entered WiFi password: <empty>"
+        fi
         read -r -p "Use this password? [Y/n] " confirm
         confirm="${confirm:-Y}"
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -1049,7 +1055,8 @@ if [ "$BACKEND" != "ollama" ] && [ -z "$API_KEY" ]; then
         echo "Error: --api-key is required with --yes"
         exit 1
     fi
-    read -r -p "LLM API key (input is visible): " API_KEY
+    read -r -s -p "LLM API key: " API_KEY
+    printf '\n'
 fi
 
 if [ "$BACKEND" != "ollama" ] && [ -z "$API_KEY" ]; then
@@ -1112,7 +1119,8 @@ if [ "$VERIFY_API_KEY" = true ]; then
                         echo "Valid API URL is required."
                     fi
                 else
-                    read -r -p "LLM API key (input is visible): " API_KEY
+                    read -r -s -p "LLM API key: " API_KEY
+                    printf '\n'
                     if [ -z "$API_KEY" ]; then
                         echo "API key is required."
                     fi
@@ -1154,7 +1162,8 @@ done
 
 if [ "$ASSUME_YES" != true ]; then
     if [ -z "$TG_TOKEN" ]; then
-        read -r -p "Telegram bot token (optional): " TG_TOKEN
+        read -r -s -p "Telegram bot token (optional): " TG_TOKEN
+        printf '\n'
     fi
 
     if [ -z "$TG_CHAT_IDS" ]; then
@@ -1229,7 +1238,11 @@ PARTTOOL_ARGS+=(write_partition --partition-name nvs --input "$nvs_bin")
 echo ""
 echo "Provisioning complete."
 echo "  WiFi SSID: $WIFI_SSID"
-echo "  WiFi password: ${WIFI_PASS:-<empty>}"
+if [ -n "$WIFI_PASS" ]; then
+    echo "  WiFi password: [set]"
+else
+    echo "  WiFi password: <empty>"
+fi
 echo "  Backend:   $BACKEND"
 echo "  Model:     $MODEL"
 if [ -n "$API_URL" ]; then
